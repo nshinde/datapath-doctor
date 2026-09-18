@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: datapath-doctor
+Version: 0.1.0
+Summary: Diagnostic engine for the storage / data-loading input path in ML training jobs
+Author: Nilesh Shinde
+License: Apache-2.0
+Keywords: pytorch,dataloader,storage,observability,gpu,ml-infrastructure,diagnostics
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: System :: Monitoring
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: psutil>=5.9
+Provides-Extra: torch
+Requires-Dist: torch>=2.0; extra == "torch"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+Requires-Dist: pytest-cov>=4.1; extra == "dev"
+Dynamic: license-file

@@ -1,0 +1,2 @@
+[console_scripts]
+datapath-doctor = datapath_doctor.cli:main

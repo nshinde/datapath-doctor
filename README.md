@@ -1,58 +1,131 @@
 # datapath-doctor
 
-A 10-rule diagnostic engine for the **storage / data-loading input path** of ML
-training jobs, with SQLite cross-run tracking. Fifth tool in a unified GPU
-observability platform, alongside [torchguard](https://github.com/nshinde/torchguard)
-(in-process PyTorch profiler + YAML rules engine), [stallscope](https://github.com/nshinde/stallscope)
-(node-level GPU/RDMA telemetry agent), and [nccl-doctor](https://github.com/nshinde/nccl-doctor)
-(17-rule NCCL diagnostic engine).
+**datapath-doctor** is an evidence-based diagnostic engine for the **storage and
+data-loading input path of ML training jobs**.
 
-Where nccl-doctor answers "why is my collective communication slow," datapath-doctor
-answers the question one layer earlier: **why is the GPU waiting at all** — disk
-I/O saturation, network filesystem latency, CPU-bound decode/tokenize work in
-DataLoader workers, an undersized prefetch buffer, a small-file-heavy dataset
-layout, shuffle buffer stalls, synchronous checkpoint I/O, or crashing worker
-processes.
+It answers a question that GPU utilization alone cannot:
 
-## Why a separate tool
+> **Why is the training loop waiting for data?**
 
-`nvidia-smi` shows GPU utilization dropping to zero between steps but not why.
-Profilers built for the compute graph (PyTorch Profiler, Nsight) see the GPU
-side clearly and the data pipeline as an opaque gap. datapath-doctor is built
-the other way around: it instruments the consumer side of the DataLoader, the
-block device underneath the dataset, and the training loop's checkpoint calls,
-then runs a rule engine over that telemetry to name the specific bottleneck
-rather than just reporting "GPU idle X% of the time."
+The tool combines DataLoader timing, worker behavior, prefetch state, Linux I/O
+pressure, block-device telemetry, storage identity, checkpoint timing, and
+optional remote-storage signals. Ten independent rules detect specific failure
+signatures, and a correlation layer combines their evidence into a likely root
+cause, contributing factor, or diagnostic symptom.
+
+datapath-doctor is part of a broader open-source ML infrastructure observability
+toolkit alongside [torchguard](https://github.com/nshinde/torchguard),
+[stallscope](https://github.com/nshinde/stallscope), and
+[nccl-doctor](https://github.com/nshinde/nccl-doctor).
+
+Where nccl-doctor asks **"why is collective communication slow?"**,
+datapath-doctor focuses one layer earlier:
+
+**"Why is the accelerator waiting for its next batch?"**
+
+## Why this exists
+
+`nvidia-smi` can show GPU utilization dropping between steps, but it cannot tell
+you whether the cause is:
+
+- saturated local storage
+- latency on network-backed storage
+- CPU-bound decode/tokenization/augmentation
+- an empty DataLoader prefetch queue
+- a small-file-heavy dataset layout
+- system-wide I/O contention
+- shuffle-buffer stalls
+- synchronous checkpoint writes
+- crashing/restarting DataLoader workers
+
+Compute-centric profilers see the accelerator side well. datapath-doctor is
+built from the opposite direction: instrument the input path, detect independent
+signals, then correlate those signals into a more useful diagnosis.
+
+## How it works
+
+```text
+Training loop
+     |
+     v
+DataLoaderProfiler + system/storage collectors
+     |
+     v
+StepSample telemetry
+     |
+     v
+WindowSummary
+     |
+     v
+10 independent diagnostic rules
+     |
+     v
+Findings + evidence
+     |
+     v
+Correlation engine
+     |
+     +--> likely root cause
+     +--> contributing factor
+     +--> diagnostic symptom
+```
+
+The rules intentionally stay independent and unit-testable. Correlation happens
+after rule evaluation, using the measurements stored in each finding's
+`evidence` rather than treating the presence of a rule ID alone as proof.
+
+For example:
+
+```text
+training waits on input for 55% of step time
+        |
+        v
+prefetch queue near-empty in 80% of samples
+        |
+        v
+network-backed storage latency = 65 ms
+        |
+        v
+LIKELY ROOT CAUSE
+remote input-storage latency is starving the training loop
+Confidence: high
+```
+
+The correlation layer also prefers a more specific causal signature over a
+generic downstream symptom. For example, tiny reads at very high IOPS can be
+reported as **small-file I/O overhead** even when the disk is also highly
+utilized, rather than stopping at the less-specific diagnosis of disk
+saturation.
 
 ## Install
 
 ```bash
-pip install -e ".[dev]"        # editable install + test deps
-pip install -e ".[torch]"      # if you want to run the DataLoader examples
+pip install -e ".[dev]"        # editable install + test dependencies
+pip install -e ".[torch]"      # optional: PyTorch DataLoader examples
 ```
 
-## Quickstart: try it on synthetic data
+## Quickstart
 
-No GPU, disk telemetry, or training job required — six scripted scenarios
-exercise the full rule set:
+No GPU or real training job is required to exercise the diagnostic engine.
+Six synthetic fault scenarios are included:
 
 ```bash
-datapath-doctor demo --scenario healthy              # no findings
-datapath-doctor demo --scenario network_fs_latency    # NFS/S3-style latency-bound reads
-datapath-doctor demo --scenario cpu_bound_decode       # workers pegged, disk idle
-datapath-doctor demo --scenario small_file_storm       # millions-of-small-files layout
-datapath-doctor demo --scenario checkpoint_stall       # sync checkpoint writes blocking steps
-datapath-doctor demo --scenario worker_crash_loop      # workers OOMing and restarting
+datapath-doctor demo --scenario healthy
+datapath-doctor demo --scenario network_fs_latency
+datapath-doctor demo --scenario cpu_bound_decode
+datapath-doctor demo --scenario small_file_storm
+datapath-doctor demo --scenario checkpoint_stall
+datapath-doctor demo --scenario worker_crash_loop
 
-datapath-doctor rules       # list all registered rules
-datapath-doctor runs        # list recorded runs (SQLite history)
-datapath-doctor trends      # rule fire-rate across recent runs
+datapath-doctor rules
+datapath-doctor runs
+datapath-doctor trends
 ```
 
-## Wiring it into a real training job
+## Wiring it into a training job
 
-`DataLoaderProfiler` wraps any DataLoader-like iterable and records per-step
-timing without changing your training loop's structure:
+`DataLoaderProfiler` wraps any DataLoader-like iterable and records how long
+the training loop spends waiting for the next batch versus computing.
 
 ```python
 from datapath_doctor.collectors.dataloader_profiler import DataLoaderProfiler
@@ -60,8 +133,19 @@ from datapath_doctor.collectors.proc_stats import DiskIOCollector, PSICollector
 from datapath_doctor.engine import RuleEngine
 from datapath_doctor.db import HistoryDB
 
-loader = torch.utils.data.DataLoader(dataset, num_workers=8, prefetch_factor=4, ...)
-profiler = DataLoaderProfiler(loader, num_workers=8, prefetch_factor=4)
+loader = torch.utils.data.DataLoader(
+    dataset,
+    num_workers=8,
+    prefetch_factor=4,
+    ...,
+)
+
+profiler = DataLoaderProfiler(
+    loader,
+    num_workers=8,
+    prefetch_factor=4,
+)
+
 disk = DiskIOCollector("nvme0n1")
 psi = PSICollector()
 
@@ -70,66 +154,193 @@ for batch in profiler:
     loss.backward()
     optimizer.step()
 
-    sample = profiler.record_compute_done(queue_depth=loader_queue_depth())
-    if disk_reading := disk.sample():
-        for k, v in disk_reading.items():
-            setattr(sample, k, v)
-    if psi_reading := psi.sample():
-        for k, v in psi_reading.items():
-            setattr(sample, k, v)
+    sample = profiler.record_compute_done(
+        queue_depth=loader_queue_depth(),
+    )
 
-# Periodically (e.g. every N steps, or at epoch end):
+    if disk_reading := disk.sample():
+        for key, value in disk_reading.items():
+            setattr(sample, key, value)
+
+    if psi_reading := psi.sample():
+        for key, value in psi_reading.items():
+            setattr(sample, key, value)
+
 engine = RuleEngine.with_default_rules()
 findings = engine.run(profiler.samples)
-HistoryDB().record_run(findings, job_name="my-training-run", num_samples=len(profiler.samples))
+
+HistoryDB().record_run(
+    findings,
+    job_name="my-training-run",
+    num_samples=len(profiler.samples),
+)
 ```
 
-Every field on `StepSample` is optional — a job with no PSI support, no
-network filesystem, or no checkpoint instrumentation still gets full value
-from the rules that apply to the telemetry it does provide.
+Every field on `StepSample` is optional except timestamp and step number. Rules
+that do not have the telemetry they need simply decline to fire.
 
-## Rule set (v0.1)
+## Telemetry model
 
-| Rule | Fires on |
+The input-path model currently supports signals in several layers.
+
+### Training / DataLoader
+
+- step time
+- data-wait time
+- compute time
+- worker count
+- prefetch factor
+- queue depth/capacity
+- mean worker CPU utilization
+- worker restart count
+
+### Local/block storage
+
+- device name
+- read throughput
+- read IOPS
+- disk utilization
+- average I/O await
+- average read size
+
+### Storage identity
+
+The model supports explicit storage identity instead of only a boolean
+"network filesystem" flag:
+
+- `storage_backend`
+- `filesystem_type`
+- legacy `is_network_fs` for compatibility
+
+This allows future collectors to distinguish paths such as local NVMe, NFS,
+Lustre, Weka, GPFS, CephFS, and FUSE-backed object storage.
+
+### Normalized remote-storage telemetry
+
+Protocol-specific collectors can normalize useful signals into:
+
+- `remote_read_latency_ms`
+- `remote_read_ops_per_s`
+- `remote_read_bytes_per_s`
+- `remote_retries`
+- `remote_errors`
+
+Protocol-specific details can remain in `StepSample.extra`.
+
+The current network-storage rule prefers normalized remote-read latency when it
+is available and falls back to block-device await for compatibility. That
+fallback is treated as a **storage-latency signal**, not proof of an
+NFS/Lustre/FUSE protocol-level root cause.
+
+### Linux pressure / pipeline state
+
+- Linux PSI I/O pressure
+- shuffle-buffer size/capacity/refill state
+- checkpoint duration and blocking state
+
+## Diagnostic rules
+
+| Rule | Detects |
 |---|---|
-| DPD-001 | GPU starved waiting on the data pipeline (headline signal) |
-| DPD-002 | Disk I/O saturation (utilization % + await) |
+| DPD-001 | Training loop starved waiting on the input pipeline |
+| DPD-002 | Block-device I/O saturation |
 | DPD-003 | System-wide I/O pressure via Linux PSI |
-| DPD-004 | Prefetch buffer underrun |
-| DPD-005 | Worker pool CPU-bound (decode/tokenize, not storage) |
-| DPD-006 | Small-file I/O overhead (tiny reads, high IOPS) |
-| DPD-007 | Network filesystem latency spike (NFS/S3/Lustre-style) |
-| DPD-008 | Shuffle buffer stall / undersized buffer |
-| DPD-009 | Checkpoint I/O blocking training steps |
-| DPD-010 | DataLoader worker crash/restart loop |
+| DPD-004 | DataLoader prefetch-buffer underrun |
+| DPD-005 | CPU-bound DataLoader worker pool |
+| DPD-006 | Small-file I/O overhead |
+| DPD-007 | Elevated latency on network/remote-backed input storage |
+| DPD-008 | Shuffle-buffer stall / undersized buffer |
+| DPD-009 | Synchronous checkpoint I/O blocking training |
+| DPD-010 | DataLoader worker crash/restart activity |
 
-Rule IDs are stable and never reused; new rules append at the next number.
+Rule IDs are stable and never reused.
+
+## Evidence-aware correlation
+
+A single alert is often insufficient to identify a bottleneck. The correlation
+engine combines compatible findings and their evidence.
+
+Examples:
+
+### CPU-bound preprocessing
+
+```text
+high data-wait fraction
+        +
+worker CPU near saturation
+        +
+disk utilization remains low
+        |
+        v
+CPU-bound input preprocessing
+```
+
+### Remote-storage latency
+
+```text
+high data-wait fraction
+        +
+prefetch queue repeatedly drains
+        +
+elevated remote-storage latency
+        |
+        v
+remote input-storage latency
+```
+
+### Small-file dataset layout
+
+```text
+high data-wait fraction
+        +
+very small average read size
+        +
+high read IOPS
+        |
+        v
+small-file I/O overhead
+```
+
+Confidence is derived from the strength of the available measurements. Missing
+evidence lowers confidence, and contradictory signals can downgrade a diagnosis
+from `root_cause` to `contributing_factor`.
+
+Some findings deliberately remain `symptom` diagnoses. For example, worker
+restarts prove worker instability but do not by themselves prove whether the
+underlying cause is an OOM kill, an uncaught transform exception, remote-I/O
+failure, or another process-level fault.
 
 ## Design
 
-- `models.py` — `StepSample` (one step's telemetry), `WindowSummary`
-  (aggregates a batch of samples once for every rule to share), `Finding`.
-- `engine.py` — `Rule` base class and `RuleEngine`, which runs every
-  registered rule against a window, isolates a misbehaving rule so it can't
-  take down the rest of the pass, and returns findings sorted by severity.
-- `collectors/` — telemetry sources: `DataLoaderProfiler` (consumer-side
-  timing + worker CPU/restart monitoring via psutil), `proc_stats`
-  (`/proc/diskstats`, `/proc/pressure/io`), and `synthetic` (the demo
-  scenarios, also used by the test suite).
-- `db.py` — SQLite persistence (`HistoryDB`) so findings survive past one
-  run and `trends` can show a rule's fire rate over the last N runs, the
-  same cross-run tracking pattern as nccl-doctor.
-- `rules/` — one file per rule, each independent and unit-testable against
-  a hand-built `WindowSummary`.
+- `models.py` — `StepSample`, `WindowSummary`, and `Finding`.
+- `engine.py` — rule registry and execution. A broken rule is isolated so it
+  cannot terminate the entire diagnostic pass.
+- `rules/` — one independent rule per file.
+- `correlation.py` — evidence-aware diagnosis and confidence scoring.
+- `collectors/dataloader_profiler.py` — consumer-side DataLoader timing plus
+  worker monitoring.
+- `collectors/proc_stats.py` — Linux `/proc/diskstats` and
+  `/proc/pressure/io` telemetry.
+- `collectors/synthetic.py` — synthetic fault scenarios used by demos/tests.
+- `db.py` — SQLite run history and cross-run rule fire-rate tracking.
+- `report.py` — terminal-friendly findings and correlated diagnosis output.
 
 ## Validation
 
-Validated with synthetic fault injection (the six scenarios above) covering
-each rule's intended failure signature, plus targeted unit tests per rule
-against hand-constructed telemetry windows. Real-workload validation against
-GPT-AR / MDLM / Mamba training runs — matching the methodology used for
-torchguard, stallscope, and nccl-doctor — is in progress; a second paper
-covering storage fault injection results is planned once that data lands.
+Current validation includes:
+
+- six synthetic fault-injection scenarios
+- targeted positive and negative tests for individual rules
+- correlation tests using real evidence values rather than only rule presence
+- tests that distinguish root causes, contributing factors, and symptoms
+- tests for storage backend identity and normalized remote-storage latency
+- precedence tests so specific signatures such as small-file I/O outrank
+  generic disk saturation
+
+Real-workload validation against training runs is still in progress. The goal is
+to validate detection precision and false-positive behavior under injected
+storage, CPU, prefetch, and checkpoint faults before treating the thresholds as
+production-calibrated defaults.
 
 ## Development
 

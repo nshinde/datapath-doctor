@@ -62,3 +62,17 @@ def test_worker_restart_is_a_symptom_not_a_root_cause():
 
 def test_unrelated_single_finding_does_not_invent_root_cause():
     assert correlate_findings([_finding("DPD-003")]) is None
+
+
+def test_specific_small_file_cause_outranks_generic_disk_saturation():
+    diagnosis = correlate_findings(
+        [
+            _finding("DPD-001", data_wait_fraction=0.60),
+            _finding("DPD-002", mean_disk_util_pct=92.0, mean_avg_await_ms=3.5),
+            _finding("DPD-006", mean_avg_read_size_kb=4.5, mean_read_iops=18000.0),
+        ]
+    )
+    assert diagnosis is not None
+    assert diagnosis.diagnosis_type == "root_cause"
+    assert "small-file I/O overhead" in diagnosis.summary
+    assert diagnosis.supporting_rule_ids == ("DPD-001", "DPD-006", "DPD-002")

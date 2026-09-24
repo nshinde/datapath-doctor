@@ -136,40 +136,6 @@ def correlate_findings(findings: list[Finding]) -> Diagnosis | None:
             },
         )
 
-    if starvation is not None and disk is not None:
-        wait_fraction = _evidence_float(starvation, "data_wait_fraction")
-        disk_util = _evidence_float(disk, "mean_disk_util_pct")
-        await_ms = _evidence_float(disk, "mean_avg_await_ms")
-        score = 0
-        if wait_fraction is not None:
-            score += 2 if wait_fraction >= 0.40 else 1 if wait_fraction >= 0.15 else 0
-        if disk_util is not None:
-            score += 2 if disk_util >= 95.0 else 1 if disk_util >= 80.0 else 0
-        if await_ms is not None and await_ms >= 2.0:
-            score += 1
-
-        chain = []
-        if wait_fraction is not None:
-            chain.append(f"training waits on input for {_fmt_percent(wait_fraction)} of step time")
-        if disk_util is not None:
-            chain.append(f"backing block device averages {disk_util:.1f}% utilization")
-        if await_ms is not None:
-            chain.append(f"mean I/O await is {await_ms:.1f} ms")
-
-        return Diagnosis(
-            summary="block-storage saturation is starving the training loop",
-            confidence=_confidence(score),
-            diagnosis_type="root_cause" if score >= 4 else "contributing_factor",
-            chain=tuple(chain),
-            supporting_rule_ids=("DPD-001", "DPD-002"),
-            evidence={
-                "data_wait_fraction": wait_fraction,
-                "mean_disk_util_pct": disk_util,
-                "mean_avg_await_ms": await_ms,
-                "correlation_score": score,
-            },
-        )
-
     if starvation is not None and network is not None:
         wait_fraction = _evidence_float(starvation, "data_wait_fraction")
         queue_empty = _evidence_float(prefetch, "fraction_samples_near_empty")
@@ -228,26 +194,65 @@ def correlate_findings(findings: list[Finding]) -> Diagnosis | None:
             score += 2 if read_kb <= 16.0 else 1 if read_kb <= 64.0 else 0
         if iops is not None:
             score += 2 if iops >= 10_000 else 1 if iops >= 500 else 0
-        if disk is not None:
-            score -= 1
-
         chain = []
         if wait_fraction is not None:
             chain.append(f"training waits on input for {_fmt_percent(wait_fraction)} of step time")
         if read_kb is not None and iops is not None:
             chain.append(f"reads average {read_kb:.1f} KiB at {iops:.0f} IOPS")
         chain.append("dataset layout is creating high per-request/metadata overhead")
+        if disk is not None:
+            disk_util = _evidence_float(disk, "mean_disk_util_pct")
+            if disk_util is not None:
+                chain.append(f"disk utilization is also elevated at {disk_util:.1f}%, consistent with downstream I/O pressure")
+
+        supporting = ["DPD-001", "DPD-006"]
+        if disk is not None:
+            supporting.append("DPD-002")
 
         return Diagnosis(
             summary="small-file I/O overhead is starving the training loop",
             confidence=_confidence(score),
-            diagnosis_type="root_cause" if score >= 5 and disk is None else "contributing_factor",
+            diagnosis_type="root_cause" if score >= 5 else "contributing_factor",
             chain=tuple(chain),
-            supporting_rule_ids=("DPD-001", "DPD-006"),
+            supporting_rule_ids=tuple(supporting),
             evidence={
                 "data_wait_fraction": wait_fraction,
                 "mean_avg_read_size_kb": read_kb,
                 "mean_read_iops": iops,
+                "correlation_score": score,
+            },
+        )
+
+    if starvation is not None and disk is not None:
+        wait_fraction = _evidence_float(starvation, "data_wait_fraction")
+        disk_util = _evidence_float(disk, "mean_disk_util_pct")
+        await_ms = _evidence_float(disk, "mean_avg_await_ms")
+        score = 0
+        if wait_fraction is not None:
+            score += 2 if wait_fraction >= 0.40 else 1 if wait_fraction >= 0.15 else 0
+        if disk_util is not None:
+            score += 2 if disk_util >= 95.0 else 1 if disk_util >= 80.0 else 0
+        if await_ms is not None and await_ms >= 2.0:
+            score += 1
+
+        chain = []
+        if wait_fraction is not None:
+            chain.append(f"training waits on input for {_fmt_percent(wait_fraction)} of step time")
+        if disk_util is not None:
+            chain.append(f"backing block device averages {disk_util:.1f}% utilization")
+        if await_ms is not None:
+            chain.append(f"mean I/O await is {await_ms:.1f} ms")
+
+        return Diagnosis(
+            summary="block-storage saturation is starving the training loop",
+            confidence=_confidence(score),
+            diagnosis_type="root_cause" if score >= 4 else "contributing_factor",
+            chain=tuple(chain),
+            supporting_rule_ids=("DPD-001", "DPD-002"),
+            evidence={
+                "data_wait_fraction": wait_fraction,
+                "mean_disk_util_pct": disk_util,
+                "mean_avg_await_ms": await_ms,
                 "correlation_score": score,
             },
         )

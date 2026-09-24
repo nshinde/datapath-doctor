@@ -12,6 +12,12 @@ _SEVERITY_LABEL = {
     Severity.INFO: "[INFO]    ",
 }
 
+_DIAGNOSIS_LABEL = {
+    "root_cause": "LIKELY ROOT CAUSE",
+    "contributing_factor": "LIKELY CONTRIBUTING FACTOR",
+    "symptom": "DIAGNOSTIC SIGNAL",
+}
+
 
 def render_findings(findings: list[Finding], num_samples: int) -> str:
     if not findings:
@@ -21,8 +27,8 @@ def render_findings(findings: list[Finding], num_samples: int) -> str:
 
     diagnosis = correlate_findings(findings)
     if diagnosis is not None:
-        lines.append("LIKELY ROOT CAUSE")
-        lines.append(f"  {diagnosis.root_cause}")
+        lines.append(_DIAGNOSIS_LABEL.get(diagnosis.diagnosis_type, "LIKELY DIAGNOSIS"))
+        lines.append(f"  {diagnosis.summary}")
         lines.append(f"  Confidence: {diagnosis.confidence}")
         lines.append("  Evidence chain:")
         for i, step in enumerate(diagnosis.chain, start=1):

@@ -43,40 +43,55 @@ class StepSample:
 
     # --- GPU-wait / step timing (from a DataLoader iterator wrapper) ---
     step_time_s: Optional[float] = None
-    data_wait_s: Optional[float] = None  # time GPU/training loop spent blocked on next batch
+    data_wait_s: Optional[float] = None
     compute_time_s: Optional[float] = None
 
     # --- DataLoader worker pool state ---
     num_workers: Optional[int] = None
     prefetch_factor: Optional[int] = None
-    queue_depth: Optional[int] = None  # batches currently buffered, ready to consume
+    queue_depth: Optional[int] = None
     queue_capacity: Optional[int] = None
-    worker_cpu_pct: Optional[float] = None  # mean CPU% across worker processes
-    worker_restarts: Optional[int] = None  # cumulative worker process restarts observed so far
+    worker_cpu_pct: Optional[float] = None
+    worker_restarts: Optional[int] = None
 
     # --- Disk I/O (per collection interval, from /proc/diskstats) ---
     disk_name: Optional[str] = None
     disk_read_bytes_per_s: Optional[float] = None
     disk_read_iops: Optional[float] = None
-    disk_util_pct: Optional[float] = None  # % of interval the disk had I/O in flight
-    disk_avg_await_ms: Optional[float] = None  # avg time per I/O request, queue + service
+    disk_util_pct: Optional[float] = None
+    disk_avg_await_ms: Optional[float] = None
 
-    # --- Filesystem hints ---
+    # --- Storage / filesystem identity ---
+    # ``is_network_fs`` is retained for backwards compatibility. New
+    # collectors should also populate storage_backend/filesystem_type so a
+    # diagnosis can distinguish local NVMe from NFS/Lustre/FUSE-style paths.
     is_network_fs: Optional[bool] = None
+    storage_backend: Optional[str] = None
+    filesystem_type: Optional[str] = None
     avg_read_size_bytes: Optional[float] = None
+
+    # --- Generic remote-storage telemetry ---
+    # Protocol-specific collectors (NFS/Lustre/FUSE/etc.) can normalize their
+    # most useful signals here while retaining protocol-specific details in
+    # ``extra``.
+    remote_read_latency_ms: Optional[float] = None
+    remote_read_ops_per_s: Optional[float] = None
+    remote_read_bytes_per_s: Optional[float] = None
+    remote_retries: Optional[int] = None
+    remote_errors: Optional[int] = None
 
     # --- PSI (pressure stall information), from /proc/pressure/io ---
     psi_io_some_avg10: Optional[float] = None
     psi_io_full_avg10: Optional[float] = None
 
-    # --- Shuffle buffer (from a DataLoader hook that instruments the shuffle stage) ---
+    # --- Shuffle buffer ---
     shuffle_buffer_size: Optional[int] = None
     shuffle_buffer_capacity: Optional[int] = None
     shuffle_refill_event: Optional[bool] = None
 
-    # --- Checkpoint I/O (from the training loop around save/load calls) ---
+    # --- Checkpoint I/O ---
     checkpoint_write_s: Optional[float] = None
-    checkpoint_blocking: Optional[bool] = None  # True if the write held up the next training step
+    checkpoint_blocking: Optional[bool] = None
 
     extra: dict[str, Any] = field(default_factory=dict)
 

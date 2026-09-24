@@ -57,3 +57,22 @@ def test_last_returns_most_recent_non_none():
         StepSample(t=1, step=1, disk_name=None),
     ]
     assert WindowSummary(samples=samples2).last("disk_name") == "a"
+
+
+def test_storage_identity_and_remote_telemetry_are_first_class_fields():
+    sample = StepSample(
+        t=1.0,
+        step=1,
+        is_network_fs=True,
+        storage_backend="nfs",
+        filesystem_type="nfs4",
+        remote_read_latency_ms=23.5,
+        remote_read_ops_per_s=1200.0,
+        remote_read_bytes_per_s=64e6,
+        remote_retries=2,
+        remote_errors=0,
+    )
+    assert sample.storage_backend == "nfs"
+    assert sample.filesystem_type == "nfs4"
+    assert sample.remote_read_latency_ms == 23.5
+    assert sample.remote_retries == 2

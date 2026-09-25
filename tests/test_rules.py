@@ -159,3 +159,12 @@ def test_worker_restarts_fires_on_delta():
 def test_worker_restarts_silent_when_flat():
     window = _window(worker_restarts=[2] * 10)
     assert WorkerCrashRestartLoopRule().evaluate(window) == []
+
+
+def test_checkpoint_blocking_ignores_long_async_save():
+    window = _window(
+        checkpoint_blocking=[False] * 10,
+        checkpoint_write_s=[20.0] * 10,
+        step_time_s=[0.5] * 10,
+    )
+    assert CheckpointIOBlockingRule().evaluate(window) == []

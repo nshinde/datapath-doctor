@@ -1,31 +1,27 @@
-"""Instrumentation for the consumer side of a PyTorch (or PyTorch-shaped)
-DataLoader: how long the training loop blocks waiting on the next batch,
-how deep the prefetch queue is, and whether worker processes are pegged or
-restarting.
-
-This deliberately does not import torch at module scope — it only needs
-``next()`` on whatever iterable it's handed, so it works against a real
-``torch.utils.data.DataLoader``, a custom loader, or a synthetic iterator in
-tests.
-"""
+"""Consumer-side instrumentation for DataLoader-like iterables."""
 
 from __future__ import annotations
 
 import os
+import socket
 import time
 from typing import Any, Iterable, Iterator, Optional
 
 from datapath_doctor.models import StepSample
 
 
-class WorkerProcessMonitor:
-    """Best-effort CPU% and restart tracking for DataLoader worker
-    processes, using psutil to inspect the current process's children.
+def _env_int(name: str) -> Optional[int]:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
-    PyTorch DataLoader workers are child processes of the process that
-    created the DataLoader when num_workers > 0, so this only works when
-    called from that same process (the common case: the training script).
-    """
+
+class WorkerProcessMonitor:
+    """Best-effort CPU and restart tracking for DataLoader workers."""
 
     def __init__(self, expected_workers: Optional[int] = None) -> None:
         self.expected_workers = expected_workers
@@ -40,7 +36,6 @@ class WorkerProcessMonitor:
             pass
 
     def sample(self) -> tuple[Optional[float], int]:
-        """Returns (mean_worker_cpu_pct, cumulative_restarts_observed)."""
         if self._psutil is None:
             return None, self._restarts
 
@@ -50,21 +45,18 @@ class WorkerProcessMonitor:
         except Exception:  # noqa: BLE001
             return None, self._restarts
 
-        current_pids = {c.pid for c in children}
+        current_pids = {child.pid for child in children}
         if self._known_pids and self.expected_workers:
             missing = self._known_pids - current_pids
             new = current_pids - self._known_pids
-            # A restart looks like: a pid we tracked disappeared and a new
-            # one showed up in its place, while we're still at/under the
-            # expected worker count.
             if missing and new:
                 self._restarts += min(len(missing), len(new))
         self._known_pids = current_pids
 
         cpu_vals = []
-        for c in children:
+        for child in children:
             try:
-                cpu_vals.append(c.cpu_percent(interval=None))
+                cpu_vals.append(child.cpu_percent(interval=None))
             except Exception:  # noqa: BLE001
                 continue
 
@@ -73,18 +65,10 @@ class WorkerProcessMonitor:
 
 
 class DataLoaderProfiler:
-    """Wraps a DataLoader-like iterable and records per-step timing.
+    """Wrap a DataLoader-like iterable and record per-step input wait time.
 
-    Usage::
-
-        profiler = DataLoaderProfiler(loader, num_workers=8, prefetch_factor=4)
-        for batch in profiler:
-            outputs = model(batch)
-            loss.backward()
-            optimizer.step()
-            profiler.record_compute_done()
-
-        samples = profiler.samples  # list[StepSample], feed to RuleEngine.run()
+    Rank metadata is optional. If omitted, common torchrun/SLURM-style
+    environment variables are used when available.
     """
 
     def __init__(
@@ -94,6 +78,10 @@ class DataLoaderProfiler:
         prefetch_factor: Optional[int] = None,
         queue_capacity: Optional[int] = None,
         monitor_workers: bool = True,
+        rank: Optional[int] = None,
+        local_rank: Optional[int] = None,
+        world_size: Optional[int] = None,
+        node_id: Optional[str] = None,
     ) -> None:
         self.loader = loader
         self.num_workers = num_workers
@@ -101,6 +89,20 @@ class DataLoaderProfiler:
         self.queue_capacity = queue_capacity or (
             num_workers * prefetch_factor if num_workers and prefetch_factor else None
         )
+
+        self.rank = rank if rank is not None else (_env_int("RANK") or _env_int("SLURM_PROCID"))
+        self.local_rank = (
+            local_rank
+            if local_rank is not None
+            else (_env_int("LOCAL_RANK") or _env_int("SLURM_LOCALID"))
+        )
+        self.world_size = (
+            world_size
+            if world_size is not None
+            else (_env_int("WORLD_SIZE") or _env_int("SLURM_NTASKS"))
+        )
+        self.node_id = node_id or os.getenv("DATAPATH_NODE_ID") or socket.gethostname()
+
         self.samples: list[StepSample] = []
         self._step = 0
         self._iter: Optional[Iterator[Any]] = None
@@ -115,15 +117,13 @@ class DataLoaderProfiler:
     def __next__(self) -> Any:
         assert self._iter is not None, "call iter(profiler) before next()"
         t0 = time.perf_counter()
-        batch = next(self._iter)  # propagates StopIteration at epoch end
+        batch = next(self._iter)
         t1 = time.perf_counter()
         self._pending_wait = t1 - t0
         self._pending_t0 = t1
         return batch
 
     def record_compute_done(self, queue_depth: Optional[int] = None) -> StepSample:
-        """Call once per step, right after the compute (forward/backward/
-        optimizer) portion finishes, to close out timing for that step."""
         if self._pending_wait is None or self._pending_t0 is None:
             raise RuntimeError("record_compute_done() called before next(profiler)")
 
@@ -138,6 +138,10 @@ class DataLoaderProfiler:
         sample = StepSample(
             t=time.time(),
             step=self._step,
+            rank=self.rank,
+            local_rank=self.local_rank,
+            world_size=self.world_size,
+            node_id=self.node_id,
             step_time_s=data_wait_s + compute_time_s,
             data_wait_s=data_wait_s,
             compute_time_s=compute_time_s,

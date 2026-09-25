@@ -1,10 +1,4 @@
-"""Core data types shared by collectors, rules, and the engine.
-
-Design mirrors nccl-doctor: a small set of plain dataclasses that collectors
-populate and rules consume, so any collector (real /proc telemetry, a
-PyTorch DataLoader hook, or a synthetic generator for tests) can feed the
-same rule set.
-"""
+"""Core data types shared by collectors, rules, and the engine."""
 
 from __future__ import annotations
 
@@ -16,8 +10,7 @@ from typing import Any, Optional
 
 
 class Severity(str, Enum):
-    """Ordered severity for a Finding. String-valued so it serializes
-    cleanly to SQLite / JSON without a custom encoder."""
+    """Ordered severity for a Finding."""
 
     INFO = "info"
     WARNING = "warning"
@@ -30,23 +23,29 @@ class Severity(str, Enum):
 
 @dataclass
 class StepSample:
-    """One training-step (or fixed-interval) snapshot of input-path telemetry.
+    """One training-step (or fixed-interval) input-path telemetry snapshot.
 
-    All fields are optional except ``t`` and ``step`` because different
-    deployments wire up different collectors — a job with no PyTorch
-    DataLoader hook (e.g. a custom loader) can still report disk/PSI fields,
-    and rules that need a field they don't see simply decline to fire.
+    Only ``t`` and ``step`` are required. Distributed identity, storage,
+    DataLoader, and checkpoint fields are optional so the same model works for
+    single-process jobs, DDP/FSDP jobs, custom loaders, and remote/object-store
+    pipelines.
     """
 
     t: float
     step: int
 
-    # --- GPU-wait / step timing (from a DataLoader iterator wrapper) ---
+    # --- Distributed identity ---
+    rank: Optional[int] = None
+    local_rank: Optional[int] = None
+    world_size: Optional[int] = None
+    node_id: Optional[str] = None
+
+    # --- Training-loop timing ---
     step_time_s: Optional[float] = None
     data_wait_s: Optional[float] = None
     compute_time_s: Optional[float] = None
 
-    # --- DataLoader worker pool state ---
+    # --- DataLoader worker-pool state ---
     num_workers: Optional[int] = None
     prefetch_factor: Optional[int] = None
     queue_depth: Optional[int] = None
@@ -54,33 +53,27 @@ class StepSample:
     worker_cpu_pct: Optional[float] = None
     worker_restarts: Optional[int] = None
 
-    # --- Disk I/O (per collection interval, from /proc/diskstats) ---
+    # --- Disk I/O ---
     disk_name: Optional[str] = None
     disk_read_bytes_per_s: Optional[float] = None
     disk_read_iops: Optional[float] = None
     disk_util_pct: Optional[float] = None
     disk_avg_await_ms: Optional[float] = None
 
-    # --- Storage / filesystem identity ---
-    # ``is_network_fs`` is retained for backwards compatibility. New
-    # collectors should also populate storage_backend/filesystem_type so a
-    # diagnosis can distinguish local NVMe from NFS/Lustre/FUSE-style paths.
+    # --- Storage identity ---
     is_network_fs: Optional[bool] = None
     storage_backend: Optional[str] = None
     filesystem_type: Optional[str] = None
     avg_read_size_bytes: Optional[float] = None
 
-    # --- Generic remote-storage telemetry ---
-    # Protocol-specific collectors (NFS/Lustre/FUSE/etc.) can normalize their
-    # most useful signals here while retaining protocol-specific details in
-    # ``extra``.
+    # --- Generic remote/object-storage telemetry ---
     remote_read_latency_ms: Optional[float] = None
     remote_read_ops_per_s: Optional[float] = None
     remote_read_bytes_per_s: Optional[float] = None
     remote_retries: Optional[int] = None
     remote_errors: Optional[int] = None
 
-    # --- PSI (pressure stall information), from /proc/pressure/io ---
+    # --- Linux pressure stall information ---
     psi_io_some_avg10: Optional[float] = None
     psi_io_full_avg10: Optional[float] = None
 
@@ -98,8 +91,7 @@ class StepSample:
 
 @dataclass
 class WindowSummary:
-    """Aggregated view over a list of StepSamples, computed once and handed
-    to every rule so rules don't each redo the same statistics."""
+    """Aggregated view over a list of StepSamples."""
 
     samples: list[StepSample]
 
@@ -122,10 +114,10 @@ class WindowSummary:
 
     def values(self, field_name: str) -> list[float]:
         out = []
-        for s in self.samples:
-            v = getattr(s, field_name, None)
-            if v is not None:
-                out.append(float(v))
+        for sample in self.samples:
+            value = getattr(sample, field_name, None)
+            if value is not None:
+                out.append(float(value))
         return out
 
     def mean(self, field_name: str) -> Optional[float]:
@@ -137,19 +129,21 @@ class WindowSummary:
         return max(vals) if vals else None
 
     def fraction_true(self, field_name: str) -> Optional[float]:
-        """For boolean fields: fraction of samples where the field is True,
-        among samples where it was set at all."""
-        vals = [getattr(s, field_name) for s in self.samples if getattr(s, field_name) is not None]
-        return (sum(1 for v in vals if v) / len(vals)) if vals else None
+        vals = [
+            getattr(sample, field_name)
+            for sample in self.samples
+            if getattr(sample, field_name) is not None
+        ]
+        return (sum(1 for value in vals if value) / len(vals)) if vals else None
 
     def count_true(self, field_name: str) -> int:
-        return sum(1 for s in self.samples if getattr(s, field_name, None))
+        return sum(1 for sample in self.samples if getattr(sample, field_name, None))
 
     def last(self, field_name: str) -> Optional[Any]:
-        for s in reversed(self.samples):
-            v = getattr(s, field_name, None)
-            if v is not None:
-                return v
+        for sample in reversed(self.samples):
+            value = getattr(sample, field_name, None)
+            if value is not None:
+                return value
         return None
 
 

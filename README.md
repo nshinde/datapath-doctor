@@ -99,9 +99,26 @@ saturation.
 
 ## Install
 
+The package is prepared for a PyPI release. Until the first release is
+published, install from source:
+
 ```bash
-pip install -e ".[dev]"        # editable install + test dependencies
-pip install -e ".[torch]"      # optional: PyTorch DataLoader examples
+git clone https://github.com/nshinde/datapath-doctor.git
+cd datapath-doctor
+pip install .
+```
+
+After the PyPI Trusted Publisher is configured and the first release is
+published:
+
+```bash
+pip install datapath-doctor
+```
+
+For development:
+
+```bash
+pip install -e ".[dev]"
 ```
 
 ## Quickstart
@@ -179,6 +196,32 @@ HistoryDB().record_run(
 Every field on `StepSample` is optional except timestamp and step number. Rules
 that do not have the telemetry they need simply decline to fire.
 
+
+## Distributed rank awareness
+
+Distributed jobs can fail at the pace of a single slow input rank. `StepSample`
+therefore carries optional `rank`, `local_rank`, `world_size`, and `node_id`
+fields. `DataLoaderProfiler` accepts them explicitly and can also pick up common
+`torchrun` / SLURM environment variables.
+
+`analyze_distributed()` runs the ordinary diagnostic rules independently per
+rank and then compares rank-level input wait behavior:
+
+```python
+from datapath_doctor.distributed import analyze_distributed
+
+analysis = analyze_distributed(all_rank_samples)
+
+if analysis.straggler:
+    print(analysis.straggler.message)
+```
+
+A rank is only marked as an input-path straggler when its mean data wait is both
+material in absolute terms and significantly slower than the peer median. The
+diagnosis intentionally says that the rank *can become the pacing rank* once
+distributed steps synchronize; it does not claim to identify the exact later
+collective where peers wait.
+
 ## Telemetry model
 
 The input-path model currently supports signals in several layers.
@@ -232,6 +275,34 @@ is available and falls back to block-device await for compatibility. That
 fallback is treated as a **storage-latency signal**, not proof of an
 NFS/Lustre/FUSE protocol-level root cause.
 
+
+### Direct object-store / streaming readers
+
+Remote loaders do not always have a meaningful block device. For direct S3,
+HTTP, fsspec, WebDataset, or custom remote readers, use
+`RemoteReadCollector` to instrument the read operation itself:
+
+```python
+from datapath_doctor.collectors import RemoteReadCollector
+
+remote = RemoteReadCollector(
+    storage_backend="s3",
+    filesystem_type="fsspec",
+)
+
+with fs.open(path, "rb") as raw:
+    f = remote.wrap_file(raw)
+    payload = f.read()
+
+reading = remote.sample()
+for key, value in reading.items():
+    setattr(step_sample, key, value)
+```
+
+The collector normalizes request latency, operations/second, bytes/second,
+retries, and errors into the existing `StepSample` fields, so DPD-007 can work
+without relying on `/proc/diskstats`.
+
 ### Linux pressure / pipeline state
 
 - Linux PSI I/O pressure
@@ -254,6 +325,14 @@ NFS/Lustre/FUSE protocol-level root cause.
 | DPD-010 | DataLoader worker crash/restart activity |
 
 Rule IDs are stable and never reused.
+
+
+### Async checkpoint behavior
+
+DPD-009 only evaluates checkpoint writes explicitly marked
+`checkpoint_blocking=True`. A long asynchronous flush with
+`checkpoint_blocking=False` does not trigger the rule. This behavior has an
+explicit regression test to protect against false positives.
 
 ## Evidence-aware correlation
 
@@ -317,10 +396,12 @@ failure, or another process-level fault.
   cannot terminate the entire diagnostic pass.
 - `rules/` — one independent rule per file.
 - `correlation.py` — evidence-aware diagnosis and confidence scoring.
+- `distributed.py` — per-rank rule evaluation and cross-rank input-straggler analysis.
 - `collectors/dataloader_profiler.py` — consumer-side DataLoader timing plus
   worker monitoring.
 - `collectors/proc_stats.py` — Linux `/proc/diskstats` and
   `/proc/pressure/io` telemetry.
+- `collectors/remote.py` — backend-agnostic remote/object-store read instrumentation.
 - `collectors/synthetic.py` — synthetic fault scenarios used by demos/tests.
 - `db.py` — SQLite run history and cross-run rule fire-rate tracking.
 - `report.py` — terminal-friendly findings and correlated diagnosis output.
@@ -333,14 +414,17 @@ Current validation includes:
 - targeted positive and negative tests for individual rules
 - correlation tests using real evidence values rather than only rule presence
 - tests that distinguish root causes, contributing factors, and symptoms
-- tests for storage backend identity and normalized remote-storage latency
+- rank-skew tests covering a single slow DataLoader rank
+- direct remote/object-store read instrumentation tests
+- an async-checkpoint regression test that prevents false blocking diagnoses
 - precedence tests so specific signatures such as small-file I/O outrank
   generic disk saturation
 
-Real-workload validation against training runs is still in progress. The goal is
-to validate detection precision and false-positive behavior under injected
-storage, CPU, prefetch, and checkpoint faults before treating the thresholds as
-production-calibrated defaults.
+Real-workload validation is still in progress. The next evidence milestone is a
+real distributed training run with an injected storage fault (for example,
+throttled network-backed input on an A100 node), showing baseline, fault, and
+recovery behavior. No real A100/NFS result is claimed in this README until that
+experiment has actually been run.
 
 ## Development
 

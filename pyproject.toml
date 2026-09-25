@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datapath-doctor"
-version = "0.1.0"
-description = "Diagnostic engine for the storage / data-loading input path in ML training jobs"
+version = "0.2.0"
+description = "Evidence-based diagnostics for ML training data-path bottlenecks"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
@@ -32,7 +32,13 @@ dependencies = [
 
 [project.optional-dependencies]
 torch = ["torch>=2.0"]
-dev = ["pytest>=7.4", "pytest-cov>=4.1"]
+remote = ["fsspec>=2024.6"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "build>=1.2"]
+
+[project.urls]
+Homepage = "https://github.com/nshinde/datapath-doctor"
+Repository = "https://github.com/nshinde/datapath-doctor"
+Issues = "https://github.com/nshinde/datapath-doctor/issues"
 
 [project.scripts]
 datapath-doctor = "datapath_doctor.cli:main"

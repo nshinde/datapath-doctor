@@ -121,8 +121,11 @@ class InstrumentedFile:
     def read(self, *args: Any, **kwargs: Any) -> Any:
         return self._collector.measure_read(self._fileobj.read, *args, **kwargs)
 
-    def __iter__(self):
-        return iter(self._fileobj)
+    def __iter__(self) -> "InstrumentedFile":
+        return self
+
+    def __next__(self) -> Any:
+        return self._collector.measure_read(next, self._fileobj)
 
     def __enter__(self) -> "InstrumentedFile":
         if hasattr(self._fileobj, "__enter__"):

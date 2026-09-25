@@ -55,8 +55,13 @@ def test_measure_read_infers_bytes():
 def test_wrapped_file_measures_reads():
     clock = FakeClock()
     collector = RemoteReadCollector("s3", filesystem_type="fsspec", clock=clock)
-    wrapped = collector.wrap_file(io.BytesIO(b"abcdef"))
-    clock.advance(0.010)
+
+    class SlowFile(io.BytesIO):
+        def read(self, *args, **kwargs):
+            clock.advance(0.010)
+            return super().read(*args, **kwargs)
+
+    wrapped = collector.wrap_file(SlowFile(b"abcdef"))
     assert wrapped.read(3) == b"abc"
     reading = collector.sample(reset=False)
     assert reading["remote_read_latency_ms"] == 10.0
@@ -77,3 +82,18 @@ def test_errors_are_recorded_and_reraised():
     reading = collector.sample(reset=False)
     assert reading["remote_errors"] == 1
     assert reading["remote_retries"] == 2
+
+
+def test_wrapped_file_measures_stream_iteration():
+    clock = FakeClock()
+    collector = RemoteReadCollector("http", clock=clock)
+
+    class SlowLines(io.BytesIO):
+        def __next__(self):
+            clock.advance(0.005)
+            return super().__next__()
+
+    wrapped = collector.wrap_file(SlowLines(b"a\nb\n"))
+    assert next(wrapped) == b"a\n"
+    reading = collector.sample(reset=False)
+    assert reading["remote_read_latency_ms"] == 5.0

@@ -20,6 +20,10 @@ def _env_int(name: str) -> Optional[int]:
         return None
 
 
+def _first_not_none(*values: Optional[int]) -> Optional[int]:
+    return next((value for value in values if value is not None), None)
+
+
 class WorkerProcessMonitor:
     """Best-effort CPU and restart tracking for DataLoader workers."""
 
@@ -90,16 +94,19 @@ class DataLoaderProfiler:
             num_workers * prefetch_factor if num_workers and prefetch_factor else None
         )
 
-        self.rank = rank if rank is not None else (_env_int("RANK") or _env_int("SLURM_PROCID"))
+        self.rank = rank if rank is not None else _first_not_none(
+            _env_int("RANK"),
+            _env_int("SLURM_PROCID"),
+        )
         self.local_rank = (
             local_rank
             if local_rank is not None
-            else (_env_int("LOCAL_RANK") or _env_int("SLURM_LOCALID"))
+            else _first_not_none(_env_int("LOCAL_RANK"), _env_int("SLURM_LOCALID"))
         )
         self.world_size = (
             world_size
             if world_size is not None
-            else (_env_int("WORLD_SIZE") or _env_int("SLURM_NTASKS"))
+            else _first_not_none(_env_int("WORLD_SIZE"), _env_int("SLURM_NTASKS"))
         )
         self.node_id = node_id or os.getenv("DATAPATH_NODE_ID") or socket.gethostname()
 

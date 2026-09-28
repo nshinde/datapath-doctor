@@ -209,13 +209,14 @@ def attach_remote_telemetry(remote, sample, latencies_ms, byte_counts) -> None:
         setattr(sample, key, value)
 
 
-def run_phase(
+def measure_phase(
     *,
-    base_url: str,
-    num_files: int,
     server,
     delay_ms: float,
     phase_name: str,
+    profiler,
+    iterator,
+    remote,
     model,
     optimizer,
     criterion,
@@ -223,35 +224,11 @@ def run_phase(
     repeats: int,
     args,
 ):
-    from datapath_doctor.collectors import DataLoaderProfiler, RemoteReadCollector
     from datapath_doctor.correlation import correlate_findings
     from datapath_doctor.engine import RuleEngine
     from datapath_doctor.report import render_findings
 
     server.delay_s = delay_ms / 1000.0
-    dataset = HttpBinaryDataset(base_url, num_files)
-
-    loader_kwargs = {
-        "dataset": dataset,
-        "batch_size": args.batch_size,
-        "shuffle": False,
-        "num_workers": args.num_workers,
-        "pin_memory": True,
-        "drop_last": True,
-    }
-    if args.num_workers > 0:
-        loader_kwargs["prefetch_factor"] = args.prefetch_factor
-        loader_kwargs["multiprocessing_context"] = "spawn"
-
-    loader = torch.utils.data.DataLoader(**loader_kwargs)
-    profiler = DataLoaderProfiler(
-        loader,
-        num_workers=args.num_workers,
-        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
-        monitor_workers=True,
-    )
-    remote = RemoteReadCollector(storage_backend="object_store", filesystem_type="http")
-    iterator = iter(profiler)
 
     def one_step():
         inputs, labels, latencies_ms, byte_counts = next(iterator)
@@ -272,9 +249,13 @@ def run_phase(
         )
         return sample
 
+    # Let the existing worker pool and prefetch queue settle into this phase.
     for _ in range(args.warmup_steps):
         one_step()
+
     profiler.samples.clear()
+    # Reset remote counters so warmup activity does not leak into measurements.
+    remote.sample(reset=True)
 
     with GpuUtilSampler(args.gpu_index) as gpu_sampler:
         phase_start = time.perf_counter()
@@ -297,7 +278,7 @@ def run_phase(
         sample.queue_depth for sample in samples if sample.queue_depth is not None
     ]
 
-    result = {
+    return {
         "phase": phase_name,
         "injected_latency_ms": delay_ms,
         "steps": args.steps,
@@ -328,12 +309,6 @@ def run_phase(
         ),
         "report": render_findings(findings, num_samples=len(samples)),
     }
-
-    shutdown = getattr(getattr(profiler, "_iter", None), "_shutdown_workers", None)
-    if callable(shutdown):
-        shutdown()
-
-    return result
 
 
 def write_sample_files(directory: Path, count: int, file_bytes: int) -> None:
@@ -423,6 +398,35 @@ def main() -> None:
         base_url = f"http://127.0.0.1:{server.server_address[1]}"
         print(f"HTTP dataset: {base_url} ({args.files} files)")
 
+        from datapath_doctor.collectors import DataLoaderProfiler, RemoteReadCollector
+
+        dataset = HttpBinaryDataset(base_url, args.files)
+        loader_kwargs = {
+            "dataset": dataset,
+            "batch_size": args.batch_size,
+            "shuffle": False,
+            "num_workers": args.num_workers,
+            "pin_memory": True,
+            "drop_last": True,
+        }
+        if args.num_workers > 0:
+            loader_kwargs["prefetch_factor"] = args.prefetch_factor
+            loader_kwargs["multiprocessing_context"] = "spawn"
+            loader_kwargs["persistent_workers"] = True
+
+        loader = torch.utils.data.DataLoader(**loader_kwargs)
+        profiler = DataLoaderProfiler(
+            loader,
+            num_workers=args.num_workers,
+            prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
+            monitor_workers=True,
+        )
+        remote = RemoteReadCollector(
+            storage_backend="object_store",
+            filesystem_type="http",
+        )
+        iterator = iter(profiler)
+
         try:
             results = []
             for phase_name, delay_ms in (
@@ -432,12 +436,13 @@ def main() -> None:
             ):
                 print(f"Running phase: {phase_name} (delay={delay_ms:.1f} ms/read)")
                 results.append(
-                    run_phase(
-                        base_url=base_url,
-                        num_files=args.files,
+                    measure_phase(
                         server=server,
                         delay_ms=delay_ms,
                         phase_name=phase_name,
+                        profiler=profiler,
+                        iterator=iterator,
+                        remote=remote,
                         model=model,
                         optimizer=optimizer,
                         criterion=criterion,
@@ -447,6 +452,9 @@ def main() -> None:
                     )
                 )
         finally:
+            # Do not call PyTorch's private _shutdown_workers() API here.
+            # Persistent workers are owned by the DataLoader iterator and are
+            # cleaned up through normal iterator/process teardown.
             server.shutdown()
             server.server_close()
             server_thread.join(timeout=3)

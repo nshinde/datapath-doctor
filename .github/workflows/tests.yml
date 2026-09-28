@@ -19,4 +19,5 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
       - run: pytest -q
+      - run: python -m py_compile experiments/a100_http_fault.py
       - run: python -m build

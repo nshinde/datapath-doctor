@@ -10,7 +10,7 @@ decode/tokenize CPU work, and checkpoint I/O.
 from datapath_doctor.models import Finding, Severity, StepSample, WindowSummary
 from datapath_doctor.engine import Rule, RuleEngine
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Finding",

@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Real A100 validation: baseline -> injected HTTP input latency -> recovery.
 
-This is intentionally a small, reproducible first real-GPU experiment. It uses
-an HTTP-backed dataset served on localhost so the storage delay can be changed
-without needing a second machine. The training work itself runs on CUDA.
-
-The script records real DataLoader wait, remote-read latency, prefetch depth,
-throughput, optional nvidia-smi utilization, and datapath-doctor findings.
+The workload uses a real CUDA training loop and a socket-backed HTTP dataset.
+The HTTP server runs locally so we can inject deterministic storage latency
+without requiring a second machine.
 """
 
 from __future__ import annotations
@@ -21,12 +18,18 @@ import tempfile
 import threading
 import time
 import urllib.request
-from dataclasses import asdict
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import version as package_version
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+try:
+    import torch
+except ImportError as exc:
+    raise SystemExit(
+        'PyTorch is required. Install with: pip install "datapath-doctor[torch]"'
+    ) from exc
 
 
 INPUT_SHAPE = (3, 64, 64)
@@ -48,9 +51,9 @@ class GpuUtilSampler:
     def __init__(self, gpu_index: int, interval_s: float = 0.5) -> None:
         self.gpu_index = gpu_index
         self.interval_s = interval_s
-        self.samples: list[float] = []
+        self.samples = []  # type: list[float]
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread = None  # type: Optional[threading.Thread]
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -88,6 +91,28 @@ class GpuUtilSampler:
         return statistics.fmean(self.samples) if self.samples else None
 
 
+class HttpBinaryDataset(torch.utils.data.Dataset):
+    def __init__(self, base_url: str, num_files: int) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.num_files = num_files
+
+    def __len__(self) -> int:
+        return 1_000_000
+
+    def __getitem__(self, index: int):
+        file_index = index % self.num_files
+        url = f"{self.base_url}/sample-{file_index:04d}.bin"
+        t0 = time.perf_counter()
+        with urllib.request.urlopen(url, timeout=10) as response:
+            payload = response.read()
+        latency_s = time.perf_counter() - t0
+
+        raw = torch.frombuffer(bytearray(payload[:INPUT_BYTES]), dtype=torch.uint8)
+        inputs = raw.float().reshape(INPUT_SHAPE).div_(255.0)
+        label = index % 10
+        return inputs, label, latency_s * 1000.0, len(payload)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run datapath-doctor baseline/fault/recovery validation on one CUDA GPU."
@@ -116,34 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def make_dataset_class(torch):
-    class HttpBinaryDataset(torch.utils.data.Dataset):
-    def __init__(self, base_url: str, num_files: int) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.num_files = num_files
-
-    def __len__(self) -> int:
-        return 1_000_000
-
-    def __getitem__(self, index: int):
-        file_index = index % self.num_files
-        url = f"{self.base_url}/sample-{file_index:04d}.bin"
-        t0 = time.perf_counter()
-        with urllib.request.urlopen(url, timeout=10) as response:
-            payload = response.read()
-        latency_s = time.perf_counter() - t0
-
-        raw = torch.frombuffer(bytearray(payload[:INPUT_BYTES]), dtype=torch.uint8)
-        x = raw.float().reshape(INPUT_SHAPE).div_(255.0)
-        label = index % 10
-        return x, label, latency_s * 1000.0, len(payload)
-
-
-def make_dataset_class(torch_module):
-    return HttpBinaryDataset
-
-
-def make_model(torch):
+def make_model():
     features = INPUT_BYTES
     return torch.nn.Sequential(
         torch.nn.Flatten(),
@@ -155,7 +153,7 @@ def make_model(torch):
     )
 
 
-def train_microsteps(torch, model, optimizer, criterion, inputs, labels, repeats: int) -> None:
+def train_microsteps(model, optimizer, criterion, inputs, labels, repeats: int) -> None:
     for _ in range(repeats):
         optimizer.zero_grad(set_to_none=True)
         logits = model(inputs)
@@ -165,25 +163,24 @@ def train_microsteps(torch, model, optimizer, criterion, inputs, labels, repeats
 
 
 def calibrate_repeats(
-    torch,
     model,
     optimizer,
     criterion,
     device,
     batch_size: int,
     target_ms: float,
-) -> tuple[int, float]:
+):
     inputs = torch.rand((batch_size, *INPUT_SHAPE), device=device)
     labels = torch.zeros(batch_size, dtype=torch.long, device=device)
 
     for _ in range(3):
-        train_microsteps(torch, model, optimizer, criterion, inputs, labels, 1)
+        train_microsteps(model, optimizer, criterion, inputs, labels, 1)
     torch.cuda.synchronize()
 
     timings = []
     for _ in range(5):
         t0 = time.perf_counter()
-        train_microsteps(torch, model, optimizer, criterion, inputs, labels, 1)
+        train_microsteps(model, optimizer, criterion, inputs, labels, 1)
         torch.cuda.synchronize()
         timings.append((time.perf_counter() - t0) * 1000.0)
 
@@ -214,7 +211,6 @@ def attach_remote_telemetry(remote, sample, latencies_ms, byte_counts) -> None:
 
 def run_phase(
     *,
-    torch,
     base_url: str,
     num_files: int,
     server,
@@ -233,17 +229,16 @@ def run_phase(
     from datapath_doctor.report import render_findings
 
     server.delay_s = delay_ms / 1000.0
-    Dataset = make_dataset_class(torch)
-    dataset = Dataset(base_url, num_files)
+    dataset = HttpBinaryDataset(base_url, num_files)
 
-    loader_kwargs = dict(
-        dataset=dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True,
-    )
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": args.batch_size,
+        "shuffle": False,
+        "num_workers": args.num_workers,
+        "pin_memory": True,
+        "drop_last": True,
+    }
     if args.num_workers > 0:
         loader_kwargs["prefetch_factor"] = args.prefetch_factor
         loader_kwargs["multiprocessing_context"] = "spawn"
@@ -256,18 +251,25 @@ def run_phase(
         monitor_workers=True,
     )
     remote = RemoteReadCollector(storage_backend="object_store", filesystem_type="http")
-
     iterator = iter(profiler)
 
     def one_step():
         inputs, labels, latencies_ms, byte_counts = next(iterator)
         inputs = inputs.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
-        train_microsteps(torch, model, optimizer, criterion, inputs, labels, repeats)
+
+        train_microsteps(model, optimizer, criterion, inputs, labels, repeats)
         torch.cuda.synchronize()
-        queue_depth = private_prefetch_depth(profiler)
-        sample = profiler.record_compute_done(queue_depth=queue_depth)
-        attach_remote_telemetry(remote, sample, latencies_ms.tolist(), byte_counts.tolist())
+
+        sample = profiler.record_compute_done(
+            queue_depth=private_prefetch_depth(profiler)
+        )
+        attach_remote_telemetry(
+            remote,
+            sample,
+            latencies_ms.tolist(),
+            byte_counts.tolist(),
+        )
         return sample
 
     for _ in range(args.warmup_steps):
@@ -281,16 +283,19 @@ def run_phase(
         duration_s = time.perf_counter() - phase_start
 
     samples = list(profiler.samples)
-    engine = RuleEngine.with_default_rules()
-    findings = engine.run(samples)
+    findings = RuleEngine.with_default_rules().run(samples)
     diagnosis = correlate_findings(findings)
 
-    total_wait = sum(s.data_wait_s or 0.0 for s in samples)
-    total_step = sum(s.step_time_s or 0.0 for s in samples)
+    total_wait = sum(sample.data_wait_s or 0.0 for sample in samples)
+    total_step = sum(sample.step_time_s or 0.0 for sample in samples)
     remote_latencies = [
-        s.remote_read_latency_ms for s in samples if s.remote_read_latency_ms is not None
+        sample.remote_read_latency_ms
+        for sample in samples
+        if sample.remote_read_latency_ms is not None
     ]
-    queue_depths = [s.queue_depth for s in samples if s.queue_depth is not None]
+    queue_depths = [
+        sample.queue_depth for sample in samples if sample.queue_depth is not None
+    ]
 
     result = {
         "phase": phase_name,
@@ -341,7 +346,7 @@ def fmt(value: Optional[float], digits: int = 1) -> str:
     return "n/a" if value is None else f"{value:.{digits}f}"
 
 
-def print_summary(results: list[dict[str, Any]]) -> None:
+def print_summary(results) -> None:
     print()
     print("A100 datapath-doctor validation")
     print(
@@ -375,21 +380,24 @@ def main() -> None:
     device = torch.device("cuda:0")
     gpu_name = torch.cuda.get_device_name(device)
     dist_version = package_version("datapath-doctor")
+
     print(f"datapath-doctor distribution: {dist_version}")
     print(f"CUDA device: {gpu_name}")
     if "A100" not in gpu_name.upper():
-        print("WARNING: this run is not on an A100; results are still valid but label them accordingly.")
+        print(
+            "WARNING: this run is not on an A100; results are valid, "
+            "but label the GPU model accurately."
+        )
 
     torch.manual_seed(7)
     torch.cuda.manual_seed_all(7)
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    model = make_model(torch).to(device)
+    model = make_model().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     criterion = torch.nn.CrossEntropyLoss()
 
     repeats, one_repeat_ms = calibrate_repeats(
-        torch,
         model,
         optimizer,
         criterion,
@@ -416,50 +424,28 @@ def main() -> None:
         print(f"HTTP dataset: {base_url} ({args.files} files)")
 
         try:
-            results = [
-                run_phase(
-                    torch=torch,
-                    base_url=base_url,
-                    num_files=args.files,
-                    server=server,
-                    delay_ms=0.0,
-                    phase_name="baseline",
-                    model=model,
-                    optimizer=optimizer,
-                    criterion=criterion,
-                    device=device,
-                    repeats=repeats,
-                    args=args,
-                ),
-                run_phase(
-                    torch=torch,
-                    base_url=base_url,
-                    num_files=args.files,
-                    server=server,
-                    delay_ms=args.fault_latency_ms,
-                    phase_name="fault",
-                    model=model,
-                    optimizer=optimizer,
-                    criterion=criterion,
-                    device=device,
-                    repeats=repeats,
-                    args=args,
-                ),
-                run_phase(
-                    torch=torch,
-                    base_url=base_url,
-                    num_files=args.files,
-                    server=server,
-                    delay_ms=0.0,
-                    phase_name="recovery",
-                    model=model,
-                    optimizer=optimizer,
-                    criterion=criterion,
-                    device=device,
-                    repeats=repeats,
-                    args=args,
-                ),
-            ]
+            results = []
+            for phase_name, delay_ms in (
+                ("baseline", 0.0),
+                ("fault", args.fault_latency_ms),
+                ("recovery", 0.0),
+            ):
+                print(f"Running phase: {phase_name} (delay={delay_ms:.1f} ms/read)")
+                results.append(
+                    run_phase(
+                        base_url=base_url,
+                        num_files=args.files,
+                        server=server,
+                        delay_ms=delay_ms,
+                        phase_name=phase_name,
+                        model=model,
+                        optimizer=optimizer,
+                        criterion=criterion,
+                        device=device,
+                        repeats=repeats,
+                        args=args,
+                    )
+                )
         finally:
             server.shutdown()
             server.server_close()

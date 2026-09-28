@@ -99,25 +99,22 @@ saturation.
 
 ## Install
 
-The package is prepared for a PyPI release. Until the first release is
-published, install from source:
-
-```bash
-git clone https://github.com/nshinde/datapath-doctor.git
-cd datapath-doctor
-pip install .
-```
-
-After the PyPI Trusted Publisher is configured and the first release is
-published:
-
 ```bash
 pip install datapath-doctor
+```
+
+Optional extras:
+
+```bash
+pip install "datapath-doctor[torch]"
+pip install "datapath-doctor[remote]"
 ```
 
 For development:
 
 ```bash
+git clone https://github.com/nshinde/datapath-doctor.git
+cd datapath-doctor
 pip install -e ".[dev]"
 ```
 

@@ -50,7 +50,7 @@ class GpuUtilSampler:
         self.interval_s = interval_s
         self.samples: list[float] = []
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._thread: Optional[threading.Thread] = None
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -84,7 +84,7 @@ class GpuUtilSampler:
             self._thread.join(timeout=3)
 
     @property
-    def mean(self) -> float | None:
+    def mean(self) -> Optional[float]:
         return statistics.fmean(self.samples) if self.samples else None
 
 
@@ -118,26 +118,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 def make_dataset_class(torch):
     class HttpBinaryDataset(torch.utils.data.Dataset):
-        def __init__(self, base_url: str, num_files: int) -> None:
-            self.base_url = base_url.rstrip("/")
-            self.num_files = num_files
+    def __init__(self, base_url: str, num_files: int) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.num_files = num_files
 
-        def __len__(self) -> int:
-            return 1_000_000
+    def __len__(self) -> int:
+        return 1_000_000
 
-        def __getitem__(self, index: int):
-            file_index = index % self.num_files
-            url = f"{self.base_url}/sample-{file_index:04d}.bin"
-            t0 = time.perf_counter()
-            with urllib.request.urlopen(url, timeout=10) as response:
-                payload = response.read()
-            latency_s = time.perf_counter() - t0
+    def __getitem__(self, index: int):
+        file_index = index % self.num_files
+        url = f"{self.base_url}/sample-{file_index:04d}.bin"
+        t0 = time.perf_counter()
+        with urllib.request.urlopen(url, timeout=10) as response:
+            payload = response.read()
+        latency_s = time.perf_counter() - t0
 
-            raw = torch.frombuffer(bytearray(payload[:INPUT_BYTES]), dtype=torch.uint8)
-            x = raw.float().reshape(INPUT_SHAPE).div_(255.0)
-            label = index % 10
-            return x, label, latency_s * 1000.0, len(payload)
+        raw = torch.frombuffer(bytearray(payload[:INPUT_BYTES]), dtype=torch.uint8)
+        x = raw.float().reshape(INPUT_SHAPE).div_(255.0)
+        label = index % 10
+        return x, label, latency_s * 1000.0, len(payload)
 
+
+def make_dataset_class(torch_module):
     return HttpBinaryDataset
 
 
@@ -190,7 +192,7 @@ def calibrate_repeats(
     return repeats, one_repeat_ms
 
 
-def private_prefetch_depth(profiler) -> int | None:
+def private_prefetch_depth(profiler) -> Optional[int]:
     """Best-effort experiment-only access to PyTorch's private DataLoader queue."""
     iterator = getattr(profiler, "_iter", None)
     queue = getattr(iterator, "_data_queue", None)
@@ -335,7 +337,7 @@ def write_sample_files(directory: Path, count: int, file_bytes: int) -> None:
         (directory / f"sample-{index:04d}.bin").write_bytes(os.urandom(payload_size))
 
 
-def fmt(value: float | None, digits: int = 1) -> str:
+def fmt(value: Optional[float], digits: int = 1) -> str:
     return "n/a" if value is None else f"{value:.{digits}f}"
 
 
@@ -366,13 +368,6 @@ def print_summary(results: list[dict[str, Any]]) -> None:
 
 def main() -> None:
     args = build_parser().parse_args()
-
-    try:
-        import torch
-    except ImportError as exc:
-        raise SystemExit(
-            'PyTorch is required. Install with: pip install "datapath-doctor[torch]"'
-        ) from exc
 
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is not available; run this experiment on an NVIDIA GPU instance.")

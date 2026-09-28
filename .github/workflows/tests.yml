@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main, distributed-input-observability]
+    branches: [main, distributed-input-observability, a100-validation-harness]
   pull_request:
 
 jobs:

@@ -1,0 +1,83 @@
+{
+  "datapath_doctor_version": "0.2.0",
+  "gpu_name": "NVIDIA A100-SXM4-40GB",
+  "torch_version": "2.7.0",
+  "cuda_version": "12.8",
+  "compute_repeats": 14,
+  "target_compute_ms": 40.0,
+  "fault_latency_ms": 60.0,
+  "results": [
+    {
+      "phase": "baseline",
+      "injected_latency_ms": 0.0,
+      "steps": 20,
+      "batch_size": 8,
+      "duration_s": 0.8455740629999582,
+      "throughput_samples_s": 189.2205626936406,
+      "mean_data_wait_ms": 0.10940740000933147,
+      "data_wait_fraction": 0.0035856516093645194,
+      "mean_remote_read_latency_ms": 0.9230183437459516,
+      "mean_prefetch_queue_depth": 4.0,
+      "mean_gpu_util_pct": 59.0,
+      "finding_ids": [],
+      "diagnosis": null,
+      "report": "datapath-doctor: 20 samples analyzed, no issues found. Input path looks healthy."
+    },
+    {
+      "phase": "fault",
+      "injected_latency_ms": 60.0,
+      "steps": 20,
+      "batch_size": 8,
+      "duration_s": 4.921713588999978,
+      "throughput_samples_s": 32.50900262819026,
+      "mean_data_wait_ms": 203.20828904999075,
+      "data_wait_fraction": 0.873350280035744,
+      "mean_remote_read_latency_ms": 61.26158479999972,
+      "mean_prefetch_queue_depth": 0.0,
+      "mean_gpu_util_pct": 14.4,
+      "finding_ids": [
+        "DPD-001",
+        "DPD-004",
+        "DPD-007"
+      ],
+      "diagnosis": {
+        "summary": "remote input-storage latency is starving the training loop",
+        "confidence": "high",
+        "diagnosis_type": "root_cause",
+        "chain": [
+          "training waits on input for 87.3% of step time",
+          "prefetch queue is near-empty in 100.0% of samples",
+          "network-backed storage remote read latency averages 61.3 ms"
+        ],
+        "supporting_rule_ids": [
+          "DPD-001",
+          "DPD-004",
+          "DPD-007"
+        ],
+        "evidence": {
+          "data_wait_fraction": 0.8734,
+          "fraction_samples_near_empty": 1.0,
+          "remote_latency_ms": 61.26,
+          "correlation_score": 6
+        }
+      },
+      "report": "datapath-doctor: 20 samples analyzed, 3 finding(s):\n\nLIKELY ROOT CAUSE\n  remote input-storage latency is starving the training loop\n  Confidence: high\n  Evidence chain:\n    1. training waits on input for 87.3% of step time\n    2. prefetch queue is near-empty in 100.0% of samples\n    3. network-backed storage remote read latency averages 61.3 ms\n  Supporting rules: DPD-001, DPD-004, DPD-007\n\n[CRITICAL] DPD-001  Data pipeline is the training bottleneck\n           The GPU spent 87.3% of step time waiting on the data pipeline across 20 steps (mean 203.2 ms/step of pure wait). Compute is starved.\n           Fix: This step time is dominated by waiting, not computing. Check the more specific findings below (disk saturation, network FS latency, CPU-bound decode, prefetch underrun) to find the root cause before tuning workers blindly.\n\n[CRITICAL] DPD-004  Prefetch buffer underrun\n           Prefetch queue was at or below 10% of capacity in 100% of samples (mean depth 0.0 / capacity 4).\n           Fix: The prefetch buffer is running dry, meaning workers can't produce batches as fast as the training loop consumes them. If disk/network telemetry doesn't show saturation and workers aren't CPU-bound, the fix is usually mechanical: raise prefetch_factor and/or num_workers so more batches are in flight. Current settings: num_workers=2, prefetch_factor=2.\n\n[CRITICAL] DPD-007  Elevated latency on network-backed input storage\n           'remote storage' is network/remote-backed and averaged 61.3 ms request latency using remote-read telemetry at 7 MB/s. This is a storage-latency signal; protocol/client telemetry is still needed to identify the exact remote-storage cause.\n           Fix: Confirm the remote-storage cause with protocol/client telemetry (for example NFS RPC latency/retransmits, Lustre client stats, or FUSE/object-store request latency). Then test more read-ahead/prefetch, larger sequential reads, or staging the working set to local NVMe.\n"
+    },
+    {
+      "phase": "recovery",
+      "injected_latency_ms": 0.0,
+      "steps": 20,
+      "batch_size": 8,
+      "duration_s": 0.8596869770000239,
+      "throughput_samples_s": 186.11425353718664,
+      "mean_data_wait_ms": 0.11351219999369278,
+      "data_wait_fraction": 0.00365953319261691,
+      "mean_remote_read_latency_ms": 0.9207175062464046,
+      "mean_prefetch_queue_depth": 4.0,
+      "mean_gpu_util_pct": 59.5,
+      "finding_ids": [],
+      "diagnosis": null,
+      "report": "datapath-doctor: 20 samples analyzed, no issues found. Input path looks healthy."
+    }
+  ]
+}

@@ -38,19 +38,33 @@ python experiments/a100_http_fault.py \
 The script prints the installed distribution version and GPU model before it
 runs. Keep that header with the experiment result.
 
-## What a useful result looks like
+## Observed A100 result
 
-Do **not** hard-code expected numbers. On a successful validation we expect the
-directional behavior to look like this:
+The first completed run used an **NVIDIA A100-SXM4-40GB**, datapath-doctor
+0.2.0, PyTorch 2.7.0, CUDA 12.8, 20 measured steps per phase, and a 60 ms/read
+injected storage delay.
 
-| Phase | Throughput | Data wait | Remote latency | Expected diagnosis |
-|---|---|---|---|---|
-| baseline | higher | low | low | healthy / no input bottleneck |
-| fault | lower | sharply higher | near injected delay | remote input-storage latency |
-| recovery | returns near baseline | low again | low again | healthy / no input bottleneck |
+| Phase | Throughput | Data wait | Remote latency | Prefetch depth | GPU util | Diagnosis |
+|---|---:|---:|---:|---:|---:|---|
+| baseline | 189.2 samples/s | 0.36% | 0.92 ms | 4.0 | 59.0% | none |
+| fault | 32.5 samples/s | 87.34% | 61.26 ms | 0.0 | 14.4% | remote input-storage latency |
+| recovery | 186.1 samples/s | 0.37% | 0.92 ms | 4.0 | 59.5% | none |
 
-The fault phase is strongest evidence if it produces DPD-001 + DPD-007 and,
-when the private PyTorch prefetch queue metric is available, DPD-004 as well.
+The fault phase produced DPD-001 + DPD-004 + DPD-007 and the correlation layer
+reported:
+
+```text
+LIKELY ROOT CAUSE
+remote input-storage latency is starving the training loop
+Confidence: high
+```
+
+The fault reduced throughput by 82.8% and GPU utilization by 75.6%. Removing
+the fault restored throughput to within 1.7% of baseline.
+
+Raw result:
+[`results/a100_http_60ms_2026-09-28.json`](results/a100_http_60ms_2026-09-28.json)
+
 
 ## Measurements
 

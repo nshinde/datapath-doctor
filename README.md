@@ -136,6 +136,49 @@ datapath-doctor runs
 datapath-doctor trends
 ```
 
+## Real A100 validation
+
+A controlled input-path fault-injection run was executed on an
+**NVIDIA A100-SXM4-40GB** using datapath-doctor 0.2.0, PyTorch 2.7.0, and
+CUDA 12.8. The same CUDA training-style workload ran through three phases:
+baseline, a 60 ms/read injected HTTP storage delay, and recovery.
+
+| Phase | Throughput | Data wait | Remote read latency | Prefetch depth | GPU util | Diagnosis |
+|---|---:|---:|---:|---:|---:|---|
+| Baseline | 189.2 samples/s | 0.36% | 0.92 ms | 4.0 | 59.0% | none |
+| 60 ms fault | 32.5 samples/s | 87.34% | 61.26 ms | 0.0 | 14.4% | remote input-storage latency |
+| Recovery | 186.1 samples/s | 0.37% | 0.92 ms | 4.0 | 59.5% | none |
+
+Under the injected fault, throughput fell by **82.8%**, GPU utilization fell by
+**75.6%**, and datapath-doctor produced a **high-confidence root-cause**
+diagnosis supported by DPD-001, DPD-004, and DPD-007:
+
+```text
+60 ms/read injected latency
+        |
+        v
+remote read latency = 61.3 ms
+        |
+        v
+prefetch queue depth = 0
+        |
+        v
+training waits on input for 87.3% of step time
+        |
+        v
+LIKELY ROOT CAUSE
+remote input-storage latency is starving the training loop
+```
+
+After removing the fault, throughput returned to within **1.7% of baseline**
+and the input path was again reported healthy.
+
+This experiment uses a controlled **localhost HTTP/socket-backed input path**.
+It validates the diagnosis on a real A100 training loop, but it is **not**
+presented as NFS, S3, Lustre, or other production network-filesystem validation.
+
+Raw result: [`experiments/results/a100_http_60ms_2026-09-28.json`](experiments/results/a100_http_60ms_2026-09-28.json)
+
 ## Wiring it into a training job
 
 `DataLoaderProfiler` wraps any DataLoader-like iterable and records how long
@@ -417,11 +460,11 @@ Current validation includes:
 - precedence tests so specific signatures such as small-file I/O outrank
   generic disk saturation
 
-Real-workload validation is still in progress. The next evidence milestone is a
-real distributed training run with an injected storage fault (for example,
-throttled network-backed input on an A100 node), showing baseline, fault, and
-recovery behavior. No real A100/NFS result is claimed in this README until that
-experiment has actually been run.
+A real A100 baseline/fault/recovery experiment has now validated the
+remote-input-latency diagnosis on a controlled localhost HTTP/socket-backed
+input path. Production-backend validation is still in progress; the next
+evidence milestone is the same methodology on NFS, S3/fsspec, Lustre, Weka, or
+another real network storage path.
 
 ## Development
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datapath-doctor"
-version = "0.2.0"
+version = "0.2.1"
 description = "Evidence-based diagnostics for ML training data-path bottlenecks"
 readme = "README.md"
 requires-python = ">=3.9"

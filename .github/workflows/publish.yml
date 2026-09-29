@@ -3,6 +3,12 @@ name: publish-to-pypi
 on:
   release:
     types: [published]
+  # One-shot 0.2.1 publication path. This push trigger is removed immediately
+  # after the trusted-publisher run succeeds.
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish.yml"
 
 permissions:
   contents: read

@@ -100,3 +100,41 @@ The strongest validation pattern is:
 - recovery: metrics move back toward baseline
 
 The exact numbers are intentionally not hard-coded.
+
+## Observed A100 result
+
+The completed attached-filesystem run used:
+
+- NVIDIA A100-SXM4-40GB
+- datapath-doctor 0.2.0
+- PyTorch 2.7.0 / CUDA 12.8
+- Lambda persistent filesystem exposed as `virtiofs`
+- 32 `fio` direct random-read processes
+- 4 KiB reads against a 512 MiB contention file
+- 20 measured training steps per phase
+
+| Phase | Throughput | Data wait | Read latency | Prefetch depth | GPU util | Diagnosis |
+|---|---:|---:|---:|---:|---:|---|
+| baseline | 185.7 samples/s | 0.34% | 3.80 ms | 3.4 | 70.0% | none |
+| fault | 67.9 samples/s | 69.85% | 29.17 ms | 0.2 | 28.4% | remote input-storage latency |
+| recovery | 186.7 samples/s | 0.38% | 2.56 ms | 3.65 | 69.0% | none |
+
+The fault phase produced DPD-001 + DPD-004 + DPD-007 and the correlation layer
+reported:
+
+```text
+LIKELY ROOT CAUSE
+remote input-storage latency is starving the training loop
+Confidence: high
+```
+
+The `fio` workload sustained about 5,167 IOPS at 20.2 MiB/s with 6.07 ms mean
+completion latency. Training throughput fell by 63.4%, GPU utilization fell by
+59.4%, and training-side read latency rose by 7.7x. After contention stopped,
+throughput returned to within 0.6% of baseline.
+
+Raw artifacts:
+
+- [result JSON](results/a100_lambda_virtiofs_fio32_2026-09-28.json)
+- [fio log](results/a100_lambda_virtiofs_fio32_2026-09-28.fio.log)
+

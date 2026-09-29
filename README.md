@@ -179,6 +179,59 @@ presented as NFS, S3, Lustre, or other production network-filesystem validation.
 
 Raw result: [`experiments/results/a100_http_60ms_2026-09-28.json`](experiments/results/a100_http_60ms_2026-09-28.json)
 
+### Lambda attached filesystem (virtiofs)
+
+A second A100 run used a real Lambda persistent filesystem mounted at
+`/lambda/nfs/...` and exposed to the guest as `virtiofs`. The fault phase
+generated direct 4 KiB random-read contention with 32 `fio` processes against
+the same attached filesystem that served the training dataset.
+
+| Phase | Throughput | Data wait | Read latency | Prefetch depth | GPU util | Diagnosis |
+|---|---:|---:|---:|---:|---:|---|
+| Baseline | 185.7 samples/s | 0.34% | 3.80 ms | 3.4 | 70.0% | none |
+| Storage contention | 67.9 samples/s | 69.85% | 29.17 ms | 0.2 | 28.4% | remote input-storage latency |
+| Recovery | 186.7 samples/s | 0.38% | 2.56 ms | 3.65 | 69.0% | none |
+
+The contention workload itself sustained about **5.2K random-read IOPS** at
+**20.2 MiB/s**, with **6.07 ms mean completion latency**. During that real
+storage fault:
+
+- training throughput fell by **63.4%**
+- GPU utilization fell by **59.4%**
+- measured training read latency increased by **7.7x**
+- the prefetch queue nearly drained
+- datapath-doctor produced a **high-confidence root-cause** diagnosis supported
+  by DPD-001, DPD-004, and DPD-007
+
+```text
+real attached-filesystem contention
+        |
+        v
+training read latency = 29.2 ms
+        |
+        v
+prefetch queue depth = 0.2 / 4
+        |
+        v
+training waits on input for 69.8% of step time
+        |
+        v
+LIKELY ROOT CAUSE
+remote input-storage latency is starving the training loop
+```
+
+After contention stopped, throughput returned to **186.7 samples/s**, within
+**0.6% of baseline**, and datapath-doctor again reported a healthy input path.
+
+The guest-visible filesystem type in this run was `virtiofs`. The result is
+therefore described as **Lambda attached-filesystem validation**, not as an NFS
+transport claim.
+
+Raw artifacts:
+
+- [result JSON](experiments/results/a100_lambda_virtiofs_fio32_2026-09-28.json)
+- [fio log](experiments/results/a100_lambda_virtiofs_fio32_2026-09-28.fio.log)
+
 ## Wiring it into a training job
 
 `DataLoaderProfiler` wraps any DataLoader-like iterable and records how long
@@ -460,11 +513,13 @@ Current validation includes:
 - precedence tests so specific signatures such as small-file I/O outrank
   generic disk saturation
 
-A real A100 baseline/fault/recovery experiment has now validated the
-remote-input-latency diagnosis on a controlled localhost HTTP/socket-backed
-input path. Production-backend validation is still in progress; the next
-evidence milestone is the same methodology on NFS, S3/fsspec, Lustre, Weka, or
-another real network storage path.
+Real A100 baseline/fault/recovery validation now covers both a controlled
+localhost HTTP/socket-backed input path and a real Lambda attached persistent
+filesystem exposed as virtiofs. In the attached-filesystem run, direct random
+read contention increased measured training read latency, drained the prefetch
+queue, reduced GPU utilization and throughput, and triggered the expected
+high-confidence DPD-001/DPD-004/DPD-007 diagnosis before recovery returned the
+input path to healthy behavior.
 
 ## Development
 

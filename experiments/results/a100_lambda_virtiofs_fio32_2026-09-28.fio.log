@@ -1,0 +1,30 @@
+datapath-nfs-contention: (g=0): rw=randread, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=psync, iodepth=1
+...
+fio-3.28
+Starting 32 processes
+
+fio: terminating on signal 2
+
+datapath-nfs-contention: (groupid=0, jobs=32): err= 0: pid=3822: Tue Sep 29 04:52:26 2026
+  read: IOPS=5167, BW=20.2MiB/s (21.2MB/s)(89.7MiB/4443msec)
+    clat (usec): min=1043, max=133555, avg=6066.26, stdev=2995.15
+     lat (usec): min=1043, max=133555, avg=6066.39, stdev=2995.15
+    clat percentiles (msec):
+     |  1.00th=[    4],  5.00th=[    5], 10.00th=[    5], 20.00th=[    6],
+     | 30.00th=[    6], 40.00th=[    6], 50.00th=[    7], 60.00th=[    7],
+     | 70.00th=[    7], 80.00th=[    7], 90.00th=[    7], 95.00th=[    8],
+     | 99.00th=[    9], 99.50th=[   11], 99.90th=[   16], 99.95th=[   96],
+     | 99.99th=[  133]
+   bw (  KiB/s): min=13960, max=23432, per=98.38%, avg=20333.00, stdev=85.15, samples=256
+   iops        : min= 3490, max= 5858, avg=5083.25, stdev=21.29, samples=256
+  lat (msec)   : 2=0.01%, 4=2.29%, 10=97.20%, 20=0.44%, 50=0.01%
+  lat (msec)   : 100=0.01%, 250=0.05%
+  cpu          : usr=0.06%, sys=0.29%, ctx=23173, majf=0, minf=381
+  IO depths    : 1=100.0%, 2=0.0%, 4=0.0%, 8=0.0%, 16=0.0%, 32=0.0%, >=64=0.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     issued rwts: total=22957,0,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=1
+
+Run status group 0 (all jobs):
+   READ: bw=20.2MiB/s (21.2MB/s), 20.2MiB/s-20.2MiB/s (21.2MB/s-21.2MB/s), io=89.7MiB (94.0MB), run=4443-4443msec

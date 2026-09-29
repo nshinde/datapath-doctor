@@ -25,7 +25,7 @@ pip install "datapath-doctor[torch]"
 
 git clone https://github.com/nshinde/datapath-doctor.git
 cd datapath-doctor
-git checkout a100-validation-harness
+git checkout main
 
 python experiments/a100_http_fault.py \
   --steps 20 \

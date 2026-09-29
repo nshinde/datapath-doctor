@@ -52,7 +52,7 @@ instead of assuming a specific transport.
 
 ## Run
 
-From the `a100-validation-harness` branch:
+From the `main` branch:
 
 ```bash
 python experiments/a100_lambda_nfs_fault.py \

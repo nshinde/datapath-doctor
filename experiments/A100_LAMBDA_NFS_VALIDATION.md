@@ -4,9 +4,11 @@ This experiment is the production-backend follow-up to the controlled localhost
 HTTP validation.
 
 The training dataset is stored directly on a Lambda filesystem mounted at
-`/lambda/nfs/<FILESYSTEM_NAME>`. During the fault phase, `fio` generates
-direct random-read contention against the same filesystem. datapath-doctor then
-measures the actual DataLoader wait, remote-file read latency, prefetch state,
+`/lambda/nfs/<FILESYSTEM_NAME>`. Lambda documents this as networked persistent
+storage; the guest-visible filesystem may appear as `virtiofs`, `filesystem`, or
+`filesystem4` depending on the instance/platform path. During the fault phase, `fio`
+generates direct random-read contention against that same attached filesystem.
+datapath-doctor then measures DataLoader wait, file-read latency, prefetch state,
 GPU utilization, and throughput.
 
 The phases are:
@@ -40,12 +42,13 @@ sudo apt-get install -y fio
 ## Verify the attached filesystem
 
 ```bash
-df -h | grep /lambda/nfs
+df -h | grep /lambda/filesystem
 findmnt -T /lambda/nfs/<FILESYSTEM_NAME>
 ```
 
-The source should be a Lambda-private NFS endpoint and the filesystem type
-should be `nfs` or `nfs4`.
+The path must be the attached Lambda filesystem. The guest-visible filesystem
+type may be `virtiofs`, `filesystem`, or `filesystem4`; the harness records the exact type
+instead of assuming a specific transport.
 
 ## Run
 
@@ -90,7 +93,7 @@ lambda_nfs_validation_results.fio.log
 The strongest validation pattern is:
 
 - baseline: healthy input path
-- fault: real NFS read latency rises, prefetch depth falls, data wait rises,
+- fault: attached-filesystem read latency rises, prefetch depth falls, data wait rises,
   GPU utilization/throughput decline
 - datapath-doctor identifies the storage/input-path cause from the measured
   evidence

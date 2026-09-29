@@ -5,8 +5,8 @@ HTTP validation.
 
 The training dataset is stored directly on a Lambda filesystem mounted at
 `/lambda/nfs/<FILESYSTEM_NAME>`. Lambda documents this as networked persistent
-storage; the guest-visible filesystem may appear as `virtiofs`, `filesystem`, or
-`filesystem4` depending on the instance/platform path. During the fault phase, `fio`
+storage; the guest-visible filesystem may appear as `virtiofs`, `nfs`, or
+`nfs4` depending on the instance/platform path. During the fault phase, `fio`
 generates direct random-read contention against that same attached filesystem.
 datapath-doctor then measures DataLoader wait, file-read latency, prefetch state,
 GPU utilization, and throughput.
@@ -42,12 +42,12 @@ sudo apt-get install -y fio
 ## Verify the attached filesystem
 
 ```bash
-df -h | grep /lambda/filesystem
+df -h | grep /lambda/nfs
 findmnt -T /lambda/nfs/<FILESYSTEM_NAME>
 ```
 
 The path must be the attached Lambda filesystem. The guest-visible filesystem
-type may be `virtiofs`, `filesystem`, or `filesystem4`; the harness records the exact type
+type may be `virtiofs`, `nfs`, or `nfs4`; the harness records the exact type
 instead of assuming a specific transport.
 
 ## Run

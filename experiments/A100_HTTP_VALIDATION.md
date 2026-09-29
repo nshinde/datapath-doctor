@@ -89,14 +89,14 @@ is available. PyTorch does not provide a stable public queue-depth API. The
 metric is therefore experiment-only and the harness safely falls back to
 `None` if that implementation detail is unavailable.
 
-## Stronger follow-up
+## Attached-filesystem follow-up
 
-After the localhost HTTP experiment is reproducible, repeat the same
-baseline/fault/recovery methodology with a real network storage backend:
+The stronger follow-up has now been completed on the same A100 class using a
+real Lambda attached persistent filesystem exposed as `virtiofs`, with direct
+random-read `fio` contention against the same storage path used by the training
+dataset.
 
-- NFS with controlled network delay/bandwidth
-- S3/fsspec with request-level telemetry
-- Lustre/Weka/another cluster filesystem if available
-
-That second experiment can support stronger claims about a specific storage
-backend.
+See [`A100_LAMBDA_NFS_VALIDATION.md`](A100_LAMBDA_NFS_VALIDATION.md) for the
+measured baseline/fault/recovery result and committed raw artifacts. Future
+validation can extend the same methodology to S3/fsspec, Lustre, Weka, or other
+production storage backends.

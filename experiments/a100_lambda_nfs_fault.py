@@ -2,7 +2,7 @@
 """Real Lambda filesystem validation on an NVIDIA GPU.
 
 Runs one persistent PyTorch DataLoader/CUDA workload through:
-  baseline -> real NFS contention -> recovery
+  baseline -> real attached-filesystem contention -> recovery
 
 The dataset and contention file both live on the attached Lambda filesystem.
 The fault is generated with direct random-read fio load against the same
@@ -84,7 +84,7 @@ class GpuUtilSampler:
         return statistics.fmean(self.samples) if self.samples else None
 
 
-class NfsBinaryDataset(torch.utils.data.Dataset):
+class LambdaFsBinaryDataset(torch.utils.data.Dataset):
     def __init__(self, files: list[str]) -> None:
         self.files = files
 
@@ -209,13 +209,36 @@ def find_mount_info(mount_path: Path) -> dict[str, str]:
     parts = raw.split()
     if len(parts) < 3:
         raise RuntimeError(f"Could not parse findmnt output: {raw!r}")
+
     target, source, fstype = parts[0], parts[1], parts[2]
-    if "nfs" not in fstype.lower():
+    normalized = fstype.lower()
+
+    # Lambda currently exposes attached filesystems through more than one
+    # guest-visible mount type. Older/documented examples can appear as NFS,
+    # while newer instances may expose the same Lambda filesystem as virtiofs.
+    # Validate the Lambda mount location instead of assuming a transport.
+    lambda_root = Path("/lambda/nfs")
+    try:
+        mount_path.relative_to(lambda_root)
+    except ValueError as exc:
         raise RuntimeError(
-            f"{mount_path} is mounted as {fstype}, not NFS/NFS4. "
-            "Use the attached Lambda filesystem mount."
+            f"{mount_path} is not under the expected Lambda filesystem root "
+            f"{lambda_root}. Refusing to label it as a Lambda attached filesystem."
+        ) from exc
+
+    supported = {"nfs", "nfs4", "virtiofs"}
+    if normalized not in supported:
+        raise RuntimeError(
+            f"{mount_path} is mounted as {fstype}. Expected a Lambda attached "
+            "filesystem exposed as nfs, nfs4, or virtiofs."
         )
-    return {"target": target, "source": source, "fstype": fstype}
+
+    return {
+        "target": target,
+        "source": source,
+        "fstype": fstype,
+        "backend": "lambda_filesystem",
+    }
 
 
 def make_model():
@@ -421,7 +444,7 @@ def fmt(value: Optional[float], digits: int = 1) -> str:
 
 def print_summary(results) -> None:
     print()
-    print("Lambda NFS datapath-doctor validation")
+    print("Lambda attached-filesystem datapath-doctor validation")
     print(
         f"{'phase':<10} {'samples/s':>10} {'wait %':>8} {'wait ms':>9} "
         f"{'remote ms':>10} {'queue':>8} {'GPU %':>7} diagnosis"
@@ -465,8 +488,9 @@ def main() -> None:
     print(f"datapath-doctor distribution: {dist_version}")
     print(f"CUDA device: {gpu_name}")
     print(
-        "Lambda filesystem: "
-        f"{mount_info['source']} -> {mount_info['target']} ({mount_info['fstype']})"
+        "Lambda attached filesystem: "
+        f"{mount_info['source']} -> {mount_info['target']} "
+        f"(guest fs={mount_info['fstype']})"
     )
     print(
         f"Contention fault: fio randread, {args.fio_numjobs} jobs, "
@@ -510,7 +534,7 @@ def main() -> None:
 
     from datapath_doctor.collectors import DataLoaderProfiler, RemoteReadCollector
 
-    dataset = NfsBinaryDataset(files)
+    dataset = LambdaFsBinaryDataset(files)
     loader_kwargs = {
         "dataset": dataset,
         "batch_size": args.batch_size,
@@ -532,7 +556,7 @@ def main() -> None:
         monitor_workers=True,
     )
     remote = RemoteReadCollector(
-        storage_backend="nfs",
+        storage_backend=mount_info["backend"],
         filesystem_type=mount_info["fstype"],
     )
     iterator = iter(profiler)
@@ -562,7 +586,7 @@ def main() -> None:
             )
         )
 
-        print("Starting real NFS contention with fio...")
+        print("Starting real attached-filesystem contention with fio...")
         fio.start()
         print("Running phase: fault")
         results.append(
@@ -610,6 +634,7 @@ def main() -> None:
         "mount_path": str(mount_path),
         "mount_target": mount_info["target"],
         "mount_source": mount_info["source"],
+        "filesystem_backend": mount_info["backend"],
         "filesystem_type": mount_info["fstype"],
         "fault_type": "fio_direct_randread_contention",
         "fio_numjobs": args.fio_numjobs,
